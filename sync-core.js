@@ -1,0 +1,27 @@
+/* Private JSON storage. No credentials or personal entries belong in this file. */
+((root)=>{
+ 'use strict';
+ const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
+ const safeId=id=>typeof id==='string'&&id.length>0&&id.length<100&&!['__proto__','constructor','prototype'].includes(id);
+ const same=(a,b)=>JSON.stringify(a??null)===JSON.stringify(b??null);
+ const empty=()=>({version:1,records:{}});
+ const entryList=doc=>Object.values(doc.records).filter(r=>r.entry!==null).map(r=>r.entry);
+ function validate(doc,validEntry){if(!doc||doc.version!==1||!doc.records||typeof doc.records!=='object'||Array.isArray(doc.records)||Object.keys(doc.records).length>30000)throw Error('Invalid cloud file. Your local copy has been kept.');for(const [id,r]of Object.entries(doc.records)){if(!safeId(id)||!r||typeof r.mutationId!=='string'||!r.mutationId||r.mutationId.length>100||!(r.entry===null||(validEntry(r.entry)&&r.entry.id===id)))throw Error('Invalid cloud file. Your local copy has been kept.');}return doc;}
+ function stage(base,pending,before,next,uuid){const result={...pending},old=new Map(before.map(e=>[e.id,e])),updated=new Map(next.map(e=>[e.id,e]));for(const id of new Set([...old.keys(),...updated.keys()])){if(!safeId(id))throw Error('This entry has an unsupported ID. Export a backup before changing it.');const value=updated.get(id)||null;if(same(old.get(id),value))continue;const remote=own(base.records,id)?base.records[id]:null;if(same(value,remote?.entry)){delete result[id];continue;}result[id]={entry:value,mutationId:uuid(),base:own(result,id)?result[id].base:remote?.mutationId||null};}return result;}
+ function merge(remote,pending){const records={...remote.records},conflicts=[];for(const [id,p]of Object.entries(pending)){if(!safeId(id))throw Error('Invalid pending entry.');const r=own(remote.records,id)?remote.records[id]:null;if(r?.mutationId===p.mutationId||same(r?.entry,p.entry))continue;if((r?.mutationId||null)!==p.base){conflicts.push({id,local:p.entry,remote:r?.entry||null});continue;}records[id]={entry:p.entry,mutationId:p.mutationId};}return {document:{version:1,records},conflicts};}
+ function acknowledge(current,sent,committed){const next={...current};for(const [id,p]of Object.entries(sent)){if(!own(next,id))continue;if(next[id].mutationId===p.mutationId)delete next[id];else if(next[id].base===p.base)next[id]={...next[id],base:committed?(committed.records[id]?.mutationId||null):p.mutationId};}return next;}
+ function overlay(base,pending){const records={...base.records};for(const [id,p]of Object.entries(pending))records[id]={entry:p.entry,mutationId:p.mutationId};return entryList({version:1,records});}
+ function encode(value){const bytes=new TextEncoder().encode(JSON.stringify(value));if(bytes.length>850000)throw Error('Cloud file is full. Export a backup before adding more entries.');let text='';for(const b of bytes)text+=String.fromCharCode(b);return btoa(text);}
+ function decode(value){return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(value.replace(/\s/g,'')),c=>c.charCodeAt(0))));}
+ function githubStore({owner,repo,token,fetcher=fetch}){
+  if(!/^[a-zA-Z0-9-]{1,39}$/.test(owner)||!/^[a-zA-Z0-9_.-]{1,100}$/.test(repo)||!token)throw Error('Check the repository name and access token.');
+  const url='https://api.github.com/repos/'+encodeURIComponent(owner)+'/'+encodeURIComponent(repo),headers={Accept:'application/vnd.github+json',Authorization:'Bearer '+token,'X-GitHub-Api-Version':'2026-03-10'};
+  async function request(path,options={}){let response;try{response=await fetcher(url+path,{...options,headers:{...headers,...options.headers},cache:'no-store',signal:AbortSignal.timeout(15000),redirect:'error'});}catch{throw Error('Connection failed. Changes are saved on this device and will retry.');}if([401,403].includes(response.status))throw Error('Check that your token is valid and has Contents read and write access to the private data repository.');return response;}
+  return {
+   async verify(){const r=await request('');if(!r.ok)throw Error('Private repository not found or token has no access.');const metadata=await r.json();if(metadata.private!==true||metadata.full_name?.toLowerCase()!==(owner+'/'+repo).toLowerCase())throw Error('Sync requires a private repository. No data was uploaded.');if(metadata.permissions?.push===false)throw Error('The token needs write access to this data repository.');return metadata;},
+   async read(validEntry){await this.verify();const r=await request('/contents/ledger.json');if(r.status===404)return {document:empty(),sha:null};if(!r.ok)throw Error('Could not read your cloud file.');const file=await r.json();if(file.type!=='file'||file.encoding!=='base64'||file.size>850000||typeof file.content!=='string')throw Error('Unsupported cloud file. Your local copy has been kept.');return {document:validate(decode(file.content),validEntry),sha:file.sha};},
+   async write(document,sha){const body={message:'Sync 10k ledger',content:encode(document)};if(sha)body.sha=sha;const r=await request('/contents/ledger.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if([409,422].includes(r.status))return false;if(!r.ok)throw Error('Could not save to GitHub. Changes are kept on this device.');return true;}
+  };
+ }
+ const api={empty,entryList,validate,stage,merge,acknowledge,overlay,encode,decode,githubStore};root.TenKSyncCore=api;if(typeof module!=='undefined'&&module.exports)module.exports=api;
+})(typeof globalThis!=='undefined'?globalThis:window);
