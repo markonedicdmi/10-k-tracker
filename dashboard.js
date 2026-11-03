@@ -1,0 +1,52 @@
+const DASH_COLORS=['#4263eb','#8b5cf6','#12a681','#f5a524','#ed6988','#16a3b5','#de7548','#98a365'];
+function dashboardData(list,range,now){
+ const end=day(now),start=range==='all'?Math.min(day(START),end,...list.map(e=>day(e.date))):end-Number(range)+1;
+ const selected=list.filter(e=>day(e.date)>=start&&day(e.date)<=end),bucket=Math.max(1,Math.ceil((end-start+1)/50));
+ const flow=Array.from({length:Math.ceil((end-start+1)/bucket)},(_,i)=>({date:new Date((start+i*bucket)*86400000).toISOString().slice(0,10),earnings:0,spending:0}));
+ const groups={earnings:{},spending:{}},sources={};
+ for(const e of selected){const i=Math.floor((day(e.date)-start)/bucket);flow[i][e.type]+=e.usdCents;const category=e.category||'Other';groups[e.type][category]=(groups[e.type][category]||0)+e.usdCents;if(e.type==='earnings'){const source=e.note.trim().replace(/\s+/g,' '),key=source.toLocaleLowerCase();if(!sources[key])sources[key]={label:source,value:0};sources[key].value+=e.usdCents;}}
+ const grouped=type=>Object.entries(groups[type]).map(([label,value])=>({label,value})).sort((a,b)=>b.value-a.value);
+ return {selected,flow,earnings:grouped('earnings'),spending:grouped('spending'),sources:Object.values(sources).sort((a,b)=>b.value-a.value).slice(0,5),bucket};
+}
+function dashNode(tag,attrs={},text){const el=document.createElement(tag);for(const [k,v]of Object.entries(attrs))el.setAttribute(k,v);if(text!==undefined)el.textContent=text;return el;}
+function dashSvg(tag,attrs={},text){const el=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v]of Object.entries(attrs))el.setAttribute(k,v);if(text!==undefined)el.textContent=text;return el;}
+function dashboardPanel(title,id,wide=false){const panel=dashNode('article',{class:'chart-panel'+(wide?' chart-wide':'')});panel.append(dashNode('h2',{},title));const content=dashNode('div',{id,class:'chart-content'});panel.append(content);return panel;}
+(()=>{
+ const section=dashNode('section',{id:'dashboard',role:'tabpanel','aria-labelledby':'dashboard-tab',hidden:''});
+ const top=dashNode('div',{class:'dashboard-heading'});top.append(dashNode('h1',{},'Dashboard'));
+ const period=dashNode('select',{id:'dashboard-range','aria-label':'Dashboard period'});for(const [value,label]of [['7','Last 7 days'],['30','Last 30 days'],['all','All entries']])period.append(dashNode('option',{value},label));period.value='all';period.onchange=()=>renderDashboard();top.append(period);section.append(top);
+ const metrics=dashNode('div',{id:'dashboard-metrics',class:'dashboard-metrics'});section.append(metrics);
+ const milestones=dashNode('section',{class:'dashboard-milestones','aria-label':'Goal milestones'});const milestoneTop=dashNode('div',{class:'milestones-heading'});milestoneTop.append(dashNode('h2',{},'Milestones'),dashNode('span',{},'$10,000 · Jan 1'));milestones.append(milestoneTop,dashNode('div',{id:'dashboard-milestones',class:'milestone-steps'}));section.append(milestones);
+ const charts=dashNode('div',{class:'dashboard-charts'});charts.append(dashboardPanel('Cash flow','cash-chart',true),dashboardPanel('Goal progress','goal-chart'),dashboardPanel('Earnings by category','earnings-chart'),dashboardPanel('Spending by category','spending-chart'),dashboardPanel('Top earning sources','sources-chart'));section.append(charts);document.getElementById('ledger').after(section);
+})();
+function dashMoney(cents){return formatted(cents)+' '+display;}
+function dashCompact(cents){const value=convertDisplay(cents);return new Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:1}).format(value);}
+function dashEmpty(parent){parent.append(dashNode('div',{class:'chart-empty'},'No entries'));}
+function chartLegend(parent,items){const legend=dashNode('div',{class:'chart-legend'});for(const item of items){const label=dashNode('span');const dot=dashNode('i');dot.style.background=item.color;label.append(dot,document.createTextNode(item.label));legend.append(label);}parent.append(legend);}
+function drawLines(parent,series,labels,{maxValue,goal=false}={}){
+ const width=680,height=250,left=58,right=18,top=16,bottom=35,w=width-left-right,h=height-top-bottom;
+ const maximum=maxValue||Math.max(1,...series.flatMap(s=>s.values));const length=Math.max(2,...series.map(s=>s.values.length));
+ const svg=dashSvg('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':series.map(s=>s.label).join(' and ')+' in '+display});
+ const x=i=>left+i/(length-1)*w,y=v=>top+h-Math.max(0,v)/maximum*h;
+ for(let i=0;i<=4;i++){const value=maximum*i/4;svg.append(dashSvg('line',{x1:left,y1:y(value),x2:width-right,y2:y(value),stroke:'#e9ece7','stroke-width':1}),dashSvg('text',{x:left-10,y:y(value)+4,'text-anchor':'end',class:'chart-axis'},dashCompact(value)));}
+ const indices=[0,Math.floor((length-1)/2),length-1];for(const i of indices)if(labels[i])svg.append(dashSvg('text',{x:x(i),y:height-9,'text-anchor':i===0?'start':i===length-1?'end':'middle',class:'chart-axis'},labels[i]));
+ for(const s of series){const points=s.values.map((v,i)=>`${x(i)},${y(v)}`).join(' ');if(!s.dashed&&s.values.length>1){svg.append(dashSvg('polygon',{points:`${x(0)},${y(0)} ${points} ${x(s.values.length-1)},${y(0)}`,fill:s.color,'fill-opacity':.06}));}svg.append(dashSvg('polyline',{points,fill:'none',stroke:s.color,'stroke-width':2.5,'stroke-linejoin':'round','stroke-dasharray':s.dashed?'6 5':'none'}));for(let i=0;i<s.values.length;i++){const p=dashSvg('circle',{cx:x(i),cy:y(s.values[i]),r:s.values.length<15?3:2,fill:s.color});p.append(dashSvg('title',{},`${labels[i]||''} · ${s.label}: ${dashMoney(s.values[i])}`));svg.append(p);}}
+ parent.append(svg);chartLegend(parent,series.map(s=>({color:s.color,label:s.label})));if(!goal&&series.every(s=>s.values.every(v=>v===0)))dashEmpty(parent);
+}
+function drawDonut(parent,items,type){const total=items.reduce((s,e)=>s+e.value,0);const wrap=dashNode('div',{class:'donut-layout'});const svg=dashSvg('svg',{viewBox:'0 0 200 200',role:'img','aria-label':type+' category breakdown in '+display});svg.append(dashSvg('circle',{cx:100,cy:100,r:69,fill:'none',stroke:'#edf0e9','stroke-width':23}));let offset=0;
+ for(const [i,item]of items.entries()){const length=total?item.value/total*100:0;const ring=dashSvg('circle',{cx:100,cy:100,r:69,fill:'none',stroke:DASH_COLORS[i%DASH_COLORS.length],'stroke-width':23,pathLength:100,'stroke-dasharray':`${length} ${100-length}`,'stroke-dashoffset':-offset,transform:'rotate(-90 100 100)'});ring.append(dashSvg('title',{},`${item.label}: ${dashMoney(item.value)} (${(length).toFixed(1)}%)`));svg.append(ring);offset+=length;}
+ svg.append(dashSvg('text',{x:100,y:99,'text-anchor':'middle',class:'donut-total'},dashCompact(total)),dashSvg('text',{x:100,y:120,'text-anchor':'middle',class:'chart-axis'},display));wrap.append(svg);
+ const legend=dashNode('div',{class:'donut-legend'});for(const [i,item]of items.entries()){const button=dashNode('button',{type:'button','aria-label':`View ${item.label} ${type}`});const dot=dashNode('i');dot.style.background=DASH_COLORS[i%DASH_COLORS.length];const label=dashNode('span',{},item.label),amount=dashNode('strong',{},dashMoney(item.value));button.append(dot,label,amount);button.onclick=()=>{setView(type);$('search').value=item.label;renderEntries();};legend.append(button);}wrap.append(legend);parent.append(wrap);if(!items.length)dashEmpty(parent);
+}
+function drawSourceBars(parent,items){if(!items.length){dashEmpty(parent);return;}const max=items[0].value;for(const [i,item]of items.entries()){const row=dashNode('button',{class:'source-row',type:'button','aria-label':'View earnings from '+item.label});const line=dashNode('div',{class:'source-row-label'});line.append(dashNode('span',{},item.label),dashNode('strong',{},dashMoney(item.value)));const track=dashNode('div',{class:'source-track'}),fill=dashNode('div');fill.style.width=(item.value/max*100)+'%';fill.style.background=DASH_COLORS[i];track.append(fill);row.append(line,track);row.onclick=()=>{setView('earnings');$('search').value=item.label;renderEntries();};parent.append(row);}}
+function renderDashboard(){
+ const data=dashboardData(entries,$('dashboard-range').value,today()),sum=totals(data.selected),all=totals(entries),goal=goalStats(all.earnings);
+ const metrics=[['Earnings',sum.earnings,'blue'],['Spending',sum.spending,'peach'],['Net',sum.earnings-sum.spending,'mint'],['Goal reached',Math.min(100,goal.percentage),'violet']];
+ $('dashboard-metrics').replaceChildren(...metrics.map(([label,value,color],i)=>{const node=dashNode('article',{class:'dashboard-metric '+color});node.append(dashNode('span',{},label),dashNode('strong',{},i===3?value.toFixed(1).replace(/\.0$/,'')+'%':formatted(value)));if(i!==3)node.append(dashNode('small',{},display));return node;}));
+ $('dashboard-milestones').replaceChildren(...[100000,250000,500000,750000,1000000].map(value=>{const reached=all.earnings>=value,node=dashNode('div',{class:'milestone-step'+(reached?' reached':'')});node.append(dashNode('span',{class:'milestone-mark'},reached?'✓':'○'),dashNode('strong',{},'$'+(value/100).toLocaleString('en-US')));node.setAttribute('aria-label',(reached?'Reached ':'Not reached ')+value/100+' USD');return node;}));
+ for(const id of ['cash-chart','goal-chart','earnings-chart','spending-chart','sources-chart'])$(id).replaceChildren();
+ const labels=data.flow.map(e=>dateLabel(e.date).replace(' 2026',''));drawLines($('cash-chart'),[{label:data.bucket===1?'Earnings':'Earnings / '+data.bucket+' days',color:'#4263eb',values:data.flow.map(e=>e.earnings)},{label:data.bucket===1?'Spending':'Spending / '+data.bucket+' days',color:'#ed8465',values:data.flow.map(e=>e.spending)}],labels);
+ const totalDays=day(END)-day(START),elapsed=Math.min(totalDays,Math.max(0,day(today())-day(START))),actual=[];for(let i=0;i<=elapsed;i++)actual.push(entries.filter(e=>e.type==='earnings'&&day(e.date)<=day(START)+i).reduce((s,e)=>s+e.usdCents,0));
+ const target=Array.from({length:totalDays+1},(_,i)=>Math.round(GOAL*i/totalDays)),goalLabels=target.map((_,i)=>dateLabel(new Date((day(START)+i)*86400000).toISOString().slice(0,10)).replace(/ 202[67]/,''));drawLines($('goal-chart'),[{label:'Earned · all entries',color:'#12a681',values:actual},{label:'Target · $10,000',color:'#a89bd8',values:target,dashed:true}],goalLabels,{maxValue:Math.max(GOAL,all.earnings),goal:true});
+ drawDonut($('earnings-chart'),data.earnings,'earnings');drawDonut($('spending-chart'),data.spending,'spending');drawSourceBars($('sources-chart'),data.sources);
+}
